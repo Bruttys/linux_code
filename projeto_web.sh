@@ -3,8 +3,12 @@
 # =============================================================================
 # Script de Automação - Deploy de Site (Debian/Ubuntu)
 #
-# Objetivo: Instalar e configurar um servidor web Apache com um
-#           template HTML baixado da internet.
+# Objetivo:
+#   - Instalar e configurar um servidor web Apache
+#   - Definir IP fixo/estático
+#   - Ocultar versão do Apache nos cabeçalhos HTTP
+#   - Publicar um template HTML baixado da internet
+#   - Reiniciar o servidor após configuração
 # =============================================================================
 
 # --- 1. Verificação de superusuário ---
@@ -31,17 +35,18 @@ echo "Atualizando lista de pacotes..."
 apt update -y
 
 echo "Instalando pacotes necessários (apache2, wget, unzip)..."
-apt install -y apache2 wget unzip
+apt install -y apache2 wget unzip net-tools
 
 # --- 4. Configuração do serviço Apache ---
 echo "Ativando e iniciando o serviço apache2..."
 systemctl enable apache2
 systemctl start apache2
 
-# --- 5. Ocultar versão do Apache nos cabeçalhos HTTP ---
+# --- 5. Ocultar versão do Apache nos cabeçalhos HTTP (sem duplicar) ---
 echo "Configurando Apache para ocultar versão nos cabeçalhos..."
-echo "ServerTokens Prod" >> /etc/apache2/conf-available/security.conf
-echo "ServerSignature Off" >> /etc/apache2/conf-available/security.conf
+conf_file="/etc/apache2/conf-available/security.conf"
+grep -q "ServerTokens Prod" $conf_file || echo "ServerTokens Prod" >> $conf_file
+grep -q "ServerSignature Off" $conf_file || echo "ServerSignature Off" >> $conf_file
 a2enconf security
 systemctl restart apache2
 
@@ -69,30 +74,52 @@ netplan apply
 
 # --- 7. Download e publicação do template ---
 diretorio_web="/var/www/html"
-url_arquivo="https://templatemo.com/tm-zip-files-2020/templatemo_600_prism_flux.zip"
+url_arquivo_primary="https://templatemo.com/tm-zip-files-2020/templatemo_600_prism_flux.zip"
+url_arquivo_fallback="https://github.com/startbootstrap/startbootstrap-clean-blog/archive/refs/heads/master.zip"
 arquivo_zip="/tmp/site.zip"
-pasta_interna="templatemo_600_prism_flux"
 
-echo "Baixando template de $url_arquivo..."
-wget -O $arquivo_zip $url_arquivo
-
-if [ $? -ne 0 ]; then
-    echo "Erro: Falha ao baixar o template."
-    exit 1
-fi
-
-echo "Publicando site em $diretorio_web..."
+echo "Limpando conteúdo atual de ${diretorio_web}..."
 rm -rf ${diretorio_web}/*
-unzip $arquivo_zip -d $diretorio_web/
 
-if [ ! -d "${diretorio_web}/${pasta_interna}" ]; then
-    echo "Erro: Pasta do template não encontrada após extração."
+echo "Baixando template primário de ${url_arquivo_primary}..."
+if ! wget -q -O "${arquivo_zip}" "${url_arquivo_primary}"; then
+  echo "Aviso: Falha ao baixar do templatemo. Tentando fallback..."
+  if ! wget -q -O "${arquivo_zip}" "${url_arquivo_fallback}"; then
+    echo "Erro: Falha ao baixar o template em ambas as URLs."
     exit 1
+  fi
 fi
 
-mv ${diretorio_web}/${pasta_interna}/* ${diretorio_web}/
-rmdir ${diretorio_web}/${pasta_interna}
-rm $arquivo_zip
+echo "Verificando integridade do arquivo ZIP..."
+if ! unzip -t "${arquivo_zip}" > /dev/null 2>&1; then
+  echo "Erro: Arquivo ZIP corrompido."
+  rm -f "${arquivo_zip}"
+  exit 1
+fi
+
+echo "Extraindo template em ${diretorio_web}..."
+unzip -q "${arquivo_zip}" -d "${diretorio_web}/"
+
+# Detecta automaticamente a pasta raiz criada pela extração
+pasta_raiz=$(find "${diretorio_web}" -maxdepth 1 -mindepth 1 -type d | head -n 1)
+if [[ -z "${pasta_raiz}" ]]; then
+  echo "Erro: Pasta raiz do template não encontrada após extração."
+  rm -f "${arquivo_zip}"
+  exit 1
+fi
+
+echo "Movendo arquivos do template para ${diretorio_web}..."
+shopt -s dotglob
+mv "${pasta_raiz}"/* "${diretorio_web}/"
+shopt -u dotglob
+rmdir "${pasta_raiz}" 2>/dev/null || true
+
+echo "Ajustando permissões e proprietário..."
+chown -R www-data:www-data "${diretorio_web}"
+chmod -R 755 "${diretorio_web}"
+
+rm -f "${arquivo_zip}"
+echo "Template publicado com sucesso."
 
 # --- 8. Exibir IP local ---
 ip_local=$(hostname -I | awk '{print $1}')
